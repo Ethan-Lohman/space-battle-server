@@ -15,7 +15,6 @@ let gameState = 'lobby'; // lobby, playing, ended
 let players = {};
 let enemies = [];
 let bullets = [];
-let mines = [];
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
@@ -95,62 +94,6 @@ io.on('connection', (socket) => {
         
         // Broadcast to all players
         io.emit('bullet-created', bullet);
-    });
-    
-    socket.on('player-mine', (data) => {
-        if (gameState !== 'playing') return;
-        
-        const mine = {
-            id: Math.random().toString(36).substr(2, 9),
-            ownerId: socket.id,
-            x: data.x,
-            z: data.z
-        };
-        
-        mines.push(mine);
-        
-        // Broadcast to all players
-        io.emit('mine-placed', mine);
-    });
-    
-    socket.on('mine-trigger', (data) => {
-        const mine = mines.find(m => m.id === data.mineId);
-        if (!mine) return;
-        
-        // Apply damage to all players within range
-        Object.keys(players).forEach(pid => {
-            if (players[pid].alive) {
-                const dx = players[pid].x - mine.x;
-                const dz = players[pid].z - mine.z;
-                const dist = Math.sqrt(dx * dx + dz * dz);
-                
-                if (dist < 3) { // Explosion radius
-                    const damage = 40; // Mine damage
-                    players[pid].health -= damage;
-                    
-                    if (players[pid].health <= 0) {
-                        players[pid].alive = false;
-                        players[pid].health = 0;
-                        
-                        io.emit('player-eliminated', {
-                            eliminatedId: pid,
-                            killerId: mine.ownerId
-                        });
-                        
-                        checkRoundEnd();
-                    } else {
-                        io.emit('player-damaged', {
-                            playerId: pid,
-                            health: players[pid].health
-                        });
-                    }
-                }
-            }
-        });
-        
-        // Remove mine
-        mines = mines.filter(m => m.id !== data.mineId);
-        io.emit('mine-exploded', { id: data.mineId });
     });
     
     socket.on('player-hit', (data) => {
@@ -243,7 +186,6 @@ function startRound() {
     roundStartTime = Date.now();
     enemies = [];
     bullets = [];
-    mines = [];
     roundWinner = null;
     zoneRadius = 50;
     
@@ -363,6 +305,16 @@ setInterval(() => {
             const targetAngle = Math.atan2(-enemy.z, -enemy.x);
             enemy.x += Math.cos(targetAngle) * 0.1;
             enemy.z += Math.sin(targetAngle) * 0.1;
+        });
+        
+        // Remove enemies that reach the center (within 2 units)
+        enemies = enemies.filter(enemy => {
+            const distFromCenter = Math.sqrt(enemy.x * enemy.x + enemy.z * enemy.z);
+            if (distFromCenter < 2) {
+                io.emit('enemy-destroyed', { id: enemy.id });
+                return false; // Remove this enemy
+            }
+            return true; // Keep this enemy
         });
         
         // Update bullets
