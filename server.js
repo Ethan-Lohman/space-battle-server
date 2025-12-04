@@ -96,8 +96,21 @@ io.on('connection', (socket) => {
     });
     
     socket.on('player-hit', (data) => {
-        // Validate hit on server
+        // Validate hit on server with cooldown to prevent spam
         if (players[data.targetId] && players[data.targetId].alive) {
+            // Add cooldown check
+            const now = Date.now();
+            if (!players[data.targetId].lastHitTime) {
+                players[data.targetId].lastHitTime = 0;
+            }
+            
+            // Only apply damage if cooldown has passed (500ms for bullets, 1000ms for enemies)
+            const cooldown = data.shooterId === 'enemy' ? 1000 : 500;
+            if (now - players[data.targetId].lastHitTime < cooldown) {
+                return; // Ignore hit, cooldown not passed
+            }
+            
+            players[data.targetId].lastHitTime = now;
             players[data.targetId].health -= data.damage;
             
             if (players[data.targetId].health <= 0) {
@@ -105,7 +118,7 @@ io.on('connection', (socket) => {
                 players[data.targetId].health = 0;
                 
                 // Award score to shooter
-                if (players[data.shooterId]) {
+                if (data.shooterId !== 'enemy' && players[data.shooterId]) {
                     players[data.shooterId].score += 100;
                 }
                 
@@ -258,7 +271,7 @@ function endRound(winner) {
     }, 10000);
 }
 
-// Update game state
+// Update game state - Reduced frequency to decrease lag
 setInterval(() => {
     if (gameState === 'playing') {
         // Update enemies
@@ -276,13 +289,13 @@ setInterval(() => {
             return bullet.life > 0 && Math.abs(bullet.x) < 50 && Math.abs(bullet.z) < 50;
         });
         
-        // Broadcast updates
+        // Broadcast updates less frequently
         io.emit('game-update', {
             enemies: enemies,
             bullets: bullets
         });
     }
-}, 50);
+}, 100); // Increased from 50ms to 100ms
 
 http.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
