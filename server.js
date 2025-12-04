@@ -11,21 +11,17 @@ const io = require('socket.io')(http, {
 const PORT = process.env.PORT || 3000;
 
 // Game state
-let gameState = 'lobby'; // lobby, playing, ended
+let gameState = 'lobby';
 let players = {};
 let enemies = [];
-let bullets = [];
-let playerMines = {}; // Track mines per player: { playerId: [mineIds] }
-let allMines = {}; // Track all mine data: { mineId: {x, z, ownerId} }
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
 let zoneRadius = 50;
 let zoneShrinkInterval = null;
 
-const LOBBY_DURATION = 15000; // 15 seconds
+const LOBBY_DURATION = 15000;
 const MIN_PLAYERS = 2;
-const MAX_MINES_PER_PLAYER = 5;
 
 // Serve static files
 app.use(express.static('public'));
@@ -71,8 +67,18 @@ io.on('connection', (socket) => {
     
     socket.on('player-update', (data) => {
         if (players[socket.id]) {
-            players[socket.id].x = data.x;
-            players[socket.id].z = data.z;
+            // Anti-cheat: Validate position isn't outside boundaries
+            const x = Math.max(-50, Math.min(50, data.x));
+            const z = Math.max(-50, Math.min(50, data.z));
+            
+            // Anti-cheat: Validate player is still alive
+            if (!players[socket.id].alive) {
+                console.log(`Anti-cheat: Dead player ${socket.id} tried to move`);
+                return;
+            }
+            
+            players[socket.id].x = x;
+            players[socket.id].z = z;
             players[socket.id].rotation = data.rotation;
             
             // Broadcast to other players
@@ -80,38 +86,86 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('place-mine', (data) => {
+    socket.on('player-shoot', (data) => {
         if (gameState !== 'playing') return;
+        if (!players[socket.id] || !players[socket.id].alive) return;
         
-        // Initialize player's mine array if doesn't exist
-        if (!playerMines[socket.id]) {
-            playerMines[socket.id] = [];
+        console.log(`Player ${socket.id} shooting from (${data.fromX}, ${data.fromZ}) to (${data.toX}, ${data.toZ})`);
+        
+        // Check if shot hits any player
+        let hitPlayer = null;
+        let hitDistance = Infinity;
+        
+        Object.keys(players).forEach(targetId => {
+            if (targetId === socket.id) return; // Don't hit yourself
+            if (!players[targetId].alive) return; // Don't hit dead players
+            
+            const target = players[targetId];
+            
+            // Simple line-to-point distance check
+            // Calculate distance from target to shot line
+            const dx = target.x - data.fromX;
+            const dz = target.z - data.fromZ;
+            const lineX = data.toX - data.fromX;
+            const lineZ = data.toZ - data.fromZ;
+            const lineLength = Math.sqrt(lineX * lineX + lineZ * lineZ);
+            
+            // Normalize line direction
+            const lineDirX = lineX / lineLength;
+            const lineDirZ = lineZ / lineLength;
+            
+            // Project target onto line
+            const projection = dx * lineDirX + dz * lineDirZ;
+            
+            // Check if projection is within line segment
+            if (projection >= 0 && projection <= lineLength) {
+                // Calculate perpendicular distance
+                const perpX = dx - projection * lineDirX;
+                const perpZ = dz - projection * lineDirZ;
+                const perpDist = Math.sqrt(perpX * perpX + perpZ * perpZ);
+                
+                // Hit if within 2 units of the line
+                if (perpDist < 2 && projection < hitDistance) {
+                    hitPlayer = targetId;
+                    hitDistance = projection;
+                }
+            }
+        });
+        
+        // Apply damage if hit
+        if (hitPlayer) {
+            players[hitPlayer].health -= 25;
+            
+            console.log(`Hit player ${hitPlayer}! Health now: ${players[hitPlayer].health}`);
+            
+            if (players[hitPlayer].health <= 0) {
+                players[hitPlayer].alive = false;
+                players[hitPlayer].health = 0;
+                
+                io.emit('player-eliminated', {
+                    eliminatedId: hitPlayer,
+                    killerId: socket.id
+                });
+                
+                checkRoundEnd();
+            } else {
+                io.emit('player-damaged', {
+                    playerId: hitPlayer,
+                    health: players[hitPlayer].health
+                });
+            }
         }
         
-        // Create mine ID
-        const mineId = Math.random().toString(36).substr(2, 9);
-        
-        // If player has 5 mines, remove oldest one
-        if (playerMines[socket.id].length >= MAX_MINES_PER_PLAYER) {
-            const oldestMineId = playerMines[socket.id].shift();
-            delete allMines[oldestMineId];
-            // Tell all clients to remove the old mine
-            io.emit('mine-removed', { id: oldestMineId });
-        }
-        
-        // Add new mine
-        playerMines[socket.id].push(mineId);
-        allMines[mineId] = {
-            id: mineId,
-            x: data.x,
-            z: data.z,
-            ownerId: socket.id
-        };
-        
-        // Broadcast mine to all players - instant, appears immediately
-        io.emit('mine-placed', allMines[mineId]);
-        
-        console.log(`Player ${socket.id} placed mine at (${data.x}, ${data.z}). Total mines: ${playerMines[socket.id].length}`);
+        // Broadcast shot visual to all players
+        io.emit('player-shot', {
+            ownerId: socket.id,
+            fromX: data.fromX,
+            fromZ: data.fromZ,
+            toX: data.toX,
+            toZ: data.toZ,
+            hit: hitPlayer !== null,
+            targetId: hitPlayer
+        });
     });
     
     socket.on('player-hit', (data) => {
@@ -203,9 +257,6 @@ function startRound() {
     gameState = 'playing';
     roundStartTime = Date.now();
     enemies = [];
-    bullets = [];
-    playerMines = {};
-    allMines = {};
     roundWinner = null;
     zoneRadius = 50;
     
