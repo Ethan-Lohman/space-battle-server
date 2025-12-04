@@ -91,11 +91,11 @@ io.on('connection', (socket) => {
         // Create mine ID
         const mineId = Math.random().toString(36).substr(2, 9);
         
-        // If player has 5 mines, remove oldest
+        // If player has 5 mines, remove oldest one
         if (playerMines[socket.id].length >= MAX_MINES_PER_PLAYER) {
             const oldestMineId = playerMines[socket.id].shift();
             delete allMines[oldestMineId];
-            // Tell clients to remove the old mine
+            // Tell all clients to remove the old mine
             io.emit('mine-removed', { id: oldestMineId });
         }
         
@@ -108,8 +108,10 @@ io.on('connection', (socket) => {
             ownerId: socket.id
         };
         
-        // Broadcast mine to all players - instant, no lag
+        // Broadcast mine to all players - instant, appears immediately
         io.emit('mine-placed', allMines[mineId]);
+        
+        console.log(`Player ${socket.id} placed mine at (${data.x}, ${data.z}). Total mines: ${playerMines[socket.id].length}`);
     });
     
     socket.on('player-hit', (data) => {
