@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3000;
 let gameState = 'lobby';
 let players = {};
 let enemies = [];
+let mines = {}; // All mines stay until round ends
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
@@ -86,86 +87,25 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('player-shoot', (data) => {
+    socket.on('place-mine', (data) => {
         if (gameState !== 'playing') return;
         if (!players[socket.id] || !players[socket.id].alive) return;
         
-        console.log(`Player ${socket.id} shooting from (${data.fromX}, ${data.fromZ}) to (${data.toX}, ${data.toZ})`);
+        const mineId = Math.random().toString(36).substr(2, 9);
         
-        // Check if shot hits any player
-        let hitPlayer = null;
-        let hitDistance = Infinity;
+        const mine = {
+            id: mineId,
+            x: data.x,
+            z: data.z,
+            ownerId: socket.id
+        };
         
-        Object.keys(players).forEach(targetId => {
-            if (targetId === socket.id) return; // Don't hit yourself
-            if (!players[targetId].alive) return; // Don't hit dead players
-            
-            const target = players[targetId];
-            
-            // Simple line-to-point distance check
-            // Calculate distance from target to shot line
-            const dx = target.x - data.fromX;
-            const dz = target.z - data.fromZ;
-            const lineX = data.toX - data.fromX;
-            const lineZ = data.toZ - data.fromZ;
-            const lineLength = Math.sqrt(lineX * lineX + lineZ * lineZ);
-            
-            // Normalize line direction
-            const lineDirX = lineX / lineLength;
-            const lineDirZ = lineZ / lineLength;
-            
-            // Project target onto line
-            const projection = dx * lineDirX + dz * lineDirZ;
-            
-            // Check if projection is within line segment
-            if (projection >= 0 && projection <= lineLength) {
-                // Calculate perpendicular distance
-                const perpX = dx - projection * lineDirX;
-                const perpZ = dz - projection * lineDirZ;
-                const perpDist = Math.sqrt(perpX * perpX + perpZ * perpZ);
-                
-                // Hit if within 2 units of the line
-                if (perpDist < 2 && projection < hitDistance) {
-                    hitPlayer = targetId;
-                    hitDistance = projection;
-                }
-            }
-        });
+        mines[mineId] = mine;
         
-        // Apply damage if hit
-        if (hitPlayer) {
-            players[hitPlayer].health -= 25;
-            
-            console.log(`Hit player ${hitPlayer}! Health now: ${players[hitPlayer].health}`);
-            
-            if (players[hitPlayer].health <= 0) {
-                players[hitPlayer].alive = false;
-                players[hitPlayer].health = 0;
-                
-                io.emit('player-eliminated', {
-                    eliminatedId: hitPlayer,
-                    killerId: socket.id
-                });
-                
-                checkRoundEnd();
-            } else {
-                io.emit('player-damaged', {
-                    playerId: hitPlayer,
-                    health: players[hitPlayer].health
-                });
-            }
-        }
+        console.log(`Player ${socket.id} placed mine at (${data.x}, ${data.z}). Total mines: ${Object.keys(mines).length}`);
         
-        // Broadcast shot visual to all players
-        io.emit('player-shot', {
-            ownerId: socket.id,
-            fromX: data.fromX,
-            fromZ: data.fromZ,
-            toX: data.toX,
-            toZ: data.toZ,
-            hit: hitPlayer !== null,
-            targetId: hitPlayer
-        });
+        // Broadcast to ALL players (including sender)
+        io.emit('mine-placed', mine);
     });
     
     socket.on('player-hit', (data) => {
@@ -257,6 +197,7 @@ function startRound() {
     gameState = 'playing';
     roundStartTime = Date.now();
     enemies = [];
+    mines = {}; // Clear all mines from previous round
     roundWinner = null;
     zoneRadius = 50;
     
