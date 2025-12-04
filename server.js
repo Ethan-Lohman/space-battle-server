@@ -15,6 +15,8 @@ let gameState = 'lobby'; // lobby, playing, ended
 let players = {};
 let enemies = [];
 let bullets = [];
+let playerMines = {}; // Track mines per player: { playerId: [mineIds] }
+let allMines = {}; // Track all mine data: { mineId: {x, z, ownerId} }
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
@@ -23,6 +25,7 @@ let zoneShrinkInterval = null;
 
 const LOBBY_DURATION = 15000; // 15 seconds
 const MIN_PLAYERS = 2;
+const MAX_MINES_PER_PLAYER = 5;
 
 // Serve static files
 app.use(express.static('public'));
@@ -77,23 +80,36 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('player-shoot', (data) => {
+    socket.on('place-mine', (data) => {
         if (gameState !== 'playing') return;
         
-        const bullet = {
-            id: Math.random().toString(36).substr(2, 9),
-            ownerId: socket.id,
+        // Initialize player's mine array if doesn't exist
+        if (!playerMines[socket.id]) {
+            playerMines[socket.id] = [];
+        }
+        
+        // Create mine ID
+        const mineId = Math.random().toString(36).substr(2, 9);
+        
+        // If player has 5 mines, remove oldest
+        if (playerMines[socket.id].length >= MAX_MINES_PER_PLAYER) {
+            const oldestMineId = playerMines[socket.id].shift();
+            delete allMines[oldestMineId];
+            // Tell clients to remove the old mine
+            io.emit('mine-removed', { id: oldestMineId });
+        }
+        
+        // Add new mine
+        playerMines[socket.id].push(mineId);
+        allMines[mineId] = {
+            id: mineId,
             x: data.x,
             z: data.z,
-            vx: data.vx,
-            vz: data.vz,
-            life: 100
+            ownerId: socket.id
         };
         
-        bullets.push(bullet);
-        
-        // Broadcast to all players
-        io.emit('bullet-created', bullet);
+        // Broadcast mine to all players - instant, no lag
+        io.emit('mine-placed', allMines[mineId]);
     });
     
     socket.on('player-hit', (data) => {
@@ -186,6 +202,8 @@ function startRound() {
     roundStartTime = Date.now();
     enemies = [];
     bullets = [];
+    playerMines = {};
+    allMines = {};
     roundWinner = null;
     zoneRadius = 50;
     
@@ -317,21 +335,12 @@ setInterval(() => {
             return true; // Keep this enemy
         });
         
-        // Update bullets
-        bullets = bullets.filter(bullet => {
-            bullet.x += bullet.vx;
-            bullet.z += bullet.vz;
-            bullet.life--;
-            return bullet.life > 0 && Math.abs(bullet.x) < 50 && Math.abs(bullet.z) < 50;
-        });
-        
-        // Broadcast updates less frequently
+        // Broadcast enemy updates
         io.emit('game-update', {
-            enemies: enemies,
-            bullets: bullets
+            enemies: enemies
         });
     }
-}, 100); // Increased from 50ms to 100ms
+}, 100); // 100ms update rate
 
 http.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
