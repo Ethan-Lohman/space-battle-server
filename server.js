@@ -14,7 +14,6 @@ const PORT = process.env.PORT || 3000;
 let gameState = 'lobby';
 let players = {};
 let enemies = [];
-let mines = {}; // All mines stay until round ends
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
@@ -87,25 +86,40 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('place-mine', (data) => {
+    socket.on('tag-player', (data) => {
         if (gameState !== 'playing') return;
         if (!players[socket.id] || !players[socket.id].alive) return;
+        if (!players[data.targetId] || !players[data.targetId].alive) return;
         
-        const mineId = Math.random().toString(36).substr(2, 9);
+        console.log(`Player ${socket.id} tagged player ${data.targetId}`);
         
-        const mine = {
-            id: mineId,
+        // Apply damage
+        players[data.targetId].health -= 20;
+        
+        if (players[data.targetId].health <= 0) {
+            players[data.targetId].alive = false;
+            players[data.targetId].health = 0;
+            
+            io.emit('player-eliminated', {
+                eliminatedId: data.targetId,
+                killerId: socket.id
+            });
+            
+            checkRoundEnd();
+        } else {
+            io.emit('player-damaged', {
+                playerId: data.targetId,
+                health: players[data.targetId].health
+            });
+        }
+        
+        // Broadcast tag visual to all players
+        io.emit('player-tagged', {
+            taggerId: socket.id,
+            targetId: data.targetId,
             x: data.x,
-            z: data.z,
-            ownerId: socket.id
-        };
-        
-        mines[mineId] = mine;
-        
-        console.log(`Player ${socket.id} placed mine at (${data.x}, ${data.z}). Total mines: ${Object.keys(mines).length}`);
-        
-        // Broadcast to ALL players (including sender)
-        io.emit('mine-placed', mine);
+            z: data.z
+        });
     });
     
     socket.on('player-hit', (data) => {
@@ -197,7 +211,6 @@ function startRound() {
     gameState = 'playing';
     roundStartTime = Date.now();
     enemies = [];
-    mines = {}; // Clear all mines from previous round
     roundWinner = null;
     zoneRadius = 50;
     
