@@ -15,9 +15,12 @@ let gameState = 'lobby'; // lobby, playing, ended
 let players = {};
 let enemies = [];
 let bullets = [];
+let mines = [];
 let roundWinner = null;
 let lobbyTimer = null;
 let roundStartTime = null;
+let zoneRadius = 50;
+let zoneShrinkInterval = null;
 
 const LOBBY_DURATION = 15000; // 15 seconds
 const MIN_PLAYERS = 2;
@@ -47,8 +50,7 @@ io.on('connection', (socket) => {
             z: data.z || 0,
             rotation: 0,
             health: 100,
-            alive: true,
-            score: 0
+            alive: true
         };
         
         console.log('Player joined:', socket.id);
@@ -95,6 +97,62 @@ io.on('connection', (socket) => {
         io.emit('bullet-created', bullet);
     });
     
+    socket.on('player-mine', (data) => {
+        if (gameState !== 'playing') return;
+        
+        const mine = {
+            id: Math.random().toString(36).substr(2, 9),
+            ownerId: socket.id,
+            x: data.x,
+            z: data.z
+        };
+        
+        mines.push(mine);
+        
+        // Broadcast to all players
+        io.emit('mine-placed', mine);
+    });
+    
+    socket.on('mine-trigger', (data) => {
+        const mine = mines.find(m => m.id === data.mineId);
+        if (!mine) return;
+        
+        // Apply damage to all players within range
+        Object.keys(players).forEach(pid => {
+            if (players[pid].alive) {
+                const dx = players[pid].x - mine.x;
+                const dz = players[pid].z - mine.z;
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                
+                if (dist < 3) { // Explosion radius
+                    const damage = 40; // Mine damage
+                    players[pid].health -= damage;
+                    
+                    if (players[pid].health <= 0) {
+                        players[pid].alive = false;
+                        players[pid].health = 0;
+                        
+                        io.emit('player-eliminated', {
+                            eliminatedId: pid,
+                            killerId: mine.ownerId
+                        });
+                        
+                        checkRoundEnd();
+                    } else {
+                        io.emit('player-damaged', {
+                            playerId: pid,
+                            health: players[pid].health
+                        });
+                    }
+                }
+            }
+        });
+        
+        // Remove mine
+        mines = mines.filter(m => m.id !== data.mineId);
+        io.emit('mine-exploded', { id: data.mineId });
+    });
+    
     socket.on('player-hit', (data) => {
         // Validate hit on server with cooldown to prevent spam
         if (players[data.targetId] && players[data.targetId].alive) {
@@ -104,8 +162,8 @@ io.on('connection', (socket) => {
                 players[data.targetId].lastHitTime = 0;
             }
             
-            // Only apply damage if cooldown has passed (500ms for bullets, 1000ms for enemies)
-            const cooldown = data.shooterId === 'enemy' ? 1000 : 500;
+            // Only apply damage if cooldown has passed
+            const cooldown = data.shooterId === 'enemy' ? 1000 : (data.shooterId === 'zone' ? 500 : 500);
             if (now - players[data.targetId].lastHitTime < cooldown) {
                 return; // Ignore hit, cooldown not passed
             }
@@ -116,11 +174,6 @@ io.on('connection', (socket) => {
             if (players[data.targetId].health <= 0) {
                 players[data.targetId].alive = false;
                 players[data.targetId].health = 0;
-                
-                // Award score to shooter
-                if (data.shooterId !== 'enemy' && players[data.shooterId]) {
-                    players[data.shooterId].score += 100;
-                }
                 
                 io.emit('player-eliminated', {
                     eliminatedId: data.targetId,
@@ -144,11 +197,6 @@ io.on('connection', (socket) => {
             enemy.health -= data.damage;
             
             if (enemy.health <= 0) {
-                // Award points to shooter
-                if (players[data.shooterId]) {
-                    players[data.shooterId].score += 10;
-                }
-                
                 // Remove enemy
                 enemies = enemies.filter(e => e.id !== data.enemyId);
                 io.emit('enemy-destroyed', { id: data.enemyId, shooterId: data.shooterId });
@@ -195,7 +243,9 @@ function startRound() {
     roundStartTime = Date.now();
     enemies = [];
     bullets = [];
+    mines = [];
     roundWinner = null;
+    zoneRadius = 50;
     
     // Reset all players
     Object.keys(players).forEach(id => {
@@ -211,6 +261,9 @@ function startRound() {
     
     // Start spawning enemies
     startEnemySpawning();
+    
+    // Start zone shrinking
+    startZoneShrinking();
 }
 
 function startEnemySpawning() {
@@ -236,6 +289,32 @@ function startEnemySpawning() {
     setTimeout(startEnemySpawning, spawnDelay);
 }
 
+function startZoneShrinking() {
+    // Clear any existing interval
+    if (zoneShrinkInterval) {
+        clearInterval(zoneShrinkInterval);
+    }
+    
+    // Shrink zone every 10 seconds
+    zoneShrinkInterval = setInterval(() => {
+        if (gameState !== 'playing') {
+            clearInterval(zoneShrinkInterval);
+            return;
+        }
+        
+        // Shrink zone by 5 units
+        zoneRadius = Math.max(5, zoneRadius - 5);
+        
+        io.emit('zone-update', { radius: zoneRadius });
+        
+        // If zone is fully closed, end the round
+        if (zoneRadius <= 5) {
+            clearInterval(zoneShrinkInterval);
+            checkRoundEnd();
+        }
+    }, 10000); // Every 10 seconds
+}
+
 function checkRoundEnd() {
     const alivePlayers = Object.values(players).filter(p => p.alive);
     
@@ -249,11 +328,15 @@ function endRound(winner) {
     gameState = 'ended';
     roundWinner = winner;
     
+    // Clear zone shrinking
+    if (zoneShrinkInterval) {
+        clearInterval(zoneShrinkInterval);
+    }
+    
     io.emit('round-end', {
         winner: winner,
         players: Object.values(players).map(p => ({
             id: p.id,
-            score: p.score,
             alive: p.alive
         }))
     });
@@ -262,6 +345,7 @@ function endRound(winner) {
     setTimeout(() => {
         gameState = 'lobby';
         lobbyTimer = null;
+        zoneRadius = 50;
         io.emit('back-to-lobby');
         
         // Auto-start if enough players
